@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Magic Mask Pro</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <img src="/web/assets/logo.svg" class="logo" alt="Magic Mask Pro logo" />
+    <h1>Magic Mask Pro</h1>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <h2>1) Source Video</h2>
+      <input id="videoUpload" type="file" accept="video/*" />
+      <video id="previewVideo" controls></video>
+
+      <div class="trim-header">
+        <h3>Trim</h3>
+        <label class="inline-check"><input id="disableTrim" type="checkbox" checked /> No Trim (use full video)</label>
+      </div>
+      <div id="trimControls" class="trim-row disabled">
+        <label>Start (s)<input id="trimStart" type="number" value="0" step="0.1" min="0" /></label>
+        <label>End (s)<input id="trimEnd" type="number" value="0" step="0.1" min="0" /></label>
+      </div>
+      <button id="previewTrimBtn">Preview Trim Segment</button>
+      <p id="trimInfo" class="muted"></p>
+    </section>
+
+    <section class="panel">
+      <h2>2) Mask Target</h2>
+      <p>Pick click mode, then click on video: green adds object, red removes background leaks.</p>
+      <div class="mode-row">
+        <button id="modeInclude" class="small active">Add To Mask</button>
+        <button id="modeExclude" class="small">Remove From Mask</button>
+        <button id="clearPoints" class="small">Clear Points</button>
+      </div>
+      <canvas id="pointCanvas"></canvas>
+      <canvas id="maskCanvas"></canvas>
+      <button id="overlayBtn">Generate Preview Overlay</button>
+      <p id="engineText" class="muted"></p>
+    </section>
+
+    <section class="panel">
+      <h2>3) Background</h2>
+      <div id="backgroundList" class="bg-grid"></div>
+      <input id="backgroundUpload" type="file" accept="image/*" />
+      <button id="processBtn">Render High Quality Video</button>
+      <div class="progress-wrap"><div id="progressBar"></div></div>
+      <p id="statusText"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Library</h2>
+      <div id="library" class="library"></div>
+    </section>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
