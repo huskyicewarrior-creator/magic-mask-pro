@@ -16,14 +16,59 @@ You can verify active engine in the UI (`Segmentation engine: ...`) and via `/ap
 - Progress bar while rendering.
 - Library with **download and delete**.
 
-## Run
+## Run (Windows + macOS/Linux)
 
-1. `cd /workspace/magic-mask-pro`
-2. `python -m venv .venv`
-3. `source .venv/bin/activate`
-4. `pip install -r requirements.txt`
-5. `uvicorn app.main:app --reload`
-6. Open `http://localhost:8000`
+1. Go to project folder:
+   ```bash
+   cd /workspace/magic-mask-pro
+   ```
+2. Create virtual environment:
+   ```bash
+   python -m venv .venv
+   ```
+3. Activate virtual environment:
+
+   **Windows PowerShell**
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   ```
+
+   **Windows CMD**
+   ```cmd
+   .venv\Scripts\activate.bat
+   ```
+
+   **macOS/Linux (bash/zsh)**
+   ```bash
+   source .venv/bin/activate
+   ```
+
+4. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+5. Start server:
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+6. Open in browser:
+   ```
+   http://localhost:8000
+   ```
+
+## PowerShell execution policy note
+
+If PowerShell blocks activation scripts, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+Then activate again:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
 ## Enable true SAM2
 
