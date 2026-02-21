@@ -1,229 +1,191 @@
-const videoUpload = document.getElementById('videoUpload');
-const previewVideo = document.getElementById('previewVideo');
-const maskCanvas = document.getElementById('maskCanvas');
-const overlayBtn = document.getElementById('overlayBtn');
-const previewTrimBtn = document.getElementById('previewTrimBtn');
-const processBtn = document.getElementById('processBtn');
-const backgroundList = document.getElementById('backgroundList');
-const backgroundUpload = document.getElementById('backgroundUpload');
-const progressBar = document.getElementById('progressBar');
-const statusText = document.getElementById('statusText');
-const libraryEl = document.getElementById('library');
-const trimStart = document.getElementById('trimStart');
-const trimEnd = document.getElementById('trimEnd');
-const disableTrim = document.getElementById('disableTrim');
-const trimControls = document.getElementById('trimControls');
-const trimInfo = document.getElementById('trimInfo');
-
-let selectedPoint = null;
-let videoId = null;
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+let projectId = null;
+let currentVideoId = null;
+let timelineClips = [];
 let selectedBackground = 'greenscreen';
-let trimPreviewActive = false;
+const maskState = { points_add: [], points_remove: [] };
 
-function setStatus(msg, isError = false) {
-  statusText.textContent = msg;
-  statusText.className = isError ? 'error' : '';
-}
-
-async function apiJson(url, options) {
+async function api(url, options = {}) {
   const res = await fetch(url, options);
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const data = await res.json();
-      if (data.detail) detail = data.detail;
-    } catch {
-      // keep status text
-    }
-    throw new Error(detail);
-  }
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-async function loadBackgrounds() {
-  try {
-    const data = await apiJson('/api/backgrounds');
-    backgroundList.innerHTML = '';
-    data.forEach((bg) => {
-      const tile = document.createElement('div');
-      tile.className = `bg-tile ${bg.id === selectedBackground ? 'active' : ''}`;
-      tile.innerHTML = `<img src="${bg.url}" alt="${bg.name}"/><small>${bg.name}</small>`;
-      tile.onclick = () => {
-        selectedBackground = bg.id;
-        loadBackgrounds();
-      };
-      backgroundList.appendChild(tile);
-    });
-  } catch (err) {
-    setStatus(`Could not load backgrounds: ${err.message}`, true);
-  }
+function setStatus(text, error = false) {
+  statusEl.textContent = text;
+  statusEl.style.color = error ? '#ff7878' : '#9e9e9e';
 }
 
-function updateTrimUI() {
-  const isDisabled = disableTrim.checked;
-  trimControls.classList.toggle('disabled', isDisabled);
-  if (!previewVideo.duration || Number.isNaN(previewVideo.duration)) return;
-  const start = Number(trimStart.value || 0);
-  const end = Number(trimEnd.value || 0);
-  if (isDisabled) {
-    trimInfo.textContent = `No trim enabled — full duration ${previewVideo.duration.toFixed(2)}s`;
-  } else {
-    trimInfo.textContent = `Trim preview window: ${start.toFixed(2)}s → ${Math.max(end, start).toFixed(2)}s`;
-  }
-}
+$('installSam2Btn').onclick = async () => {
+  const report = await api('/api/install/sam2', { method: 'POST' });
+  setStatus(report.ok ? 'SAM2 setup complete.' : 'SAM2 setup reported warnings.', !report.ok);
+};
 
-videoUpload.addEventListener('change', async (e) => {
+$('createProjectBtn').onclick = async () => {
+  const fd = new FormData();
+  fd.append('name', $('projectName').value || 'Untitled Project');
+  const data = await api('/api/projects', { method: 'POST', body: fd });
+  projectId = data.project_id;
+  setStatus(`Project created: ${data.name}`);
+};
+
+$('videoUpload').onchange = async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  try {
-    const form = new FormData();
-    form.append('file', file);
-    const data = await apiJson('/api/upload-video', { method: 'POST', body: form });
-    videoId = data.video_id;
-    previewVideo.src = URL.createObjectURL(file);
-    setStatus('Video uploaded. Click object to track.');
-  } catch (err) {
-    setStatus(`Upload failed: ${err.message}`, true);
-  }
+  const fd = new FormData();
+  fd.append('file', file);
+  const data = await api('/api/upload-video', { method: 'POST', body: fd });
+  currentVideoId = data.video_id;
+  $('previewVideo').src = `/api/media/${data.video_id}`;
+  $('clipInfo').textContent = `Loaded ${data.video_id} (${data.duration}s)`;
+  setStatus('Video loaded');
+};
+
+$('addClipBtn').onclick = async () => {
+  if (!projectId || !currentVideoId) return setStatus('Create project and upload video first', true);
+  const clip = await api('/api/clips', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_id: projectId,
+      video_id: currentVideoId,
+      in_point: Number($('trimStart').value || 0),
+      out_point: Number($('trimEnd').value || 0) || null,
+    }),
+  });
+  timelineClips.push(clip);
+  renderTimeline();
+};
+
+$('previewVideo').addEventListener('click', (e) => {
+  const video = $('previewVideo');
+  const rect = video.getBoundingClientRect();
+  const x = Math.round(((e.clientX - rect.left) / rect.width) * video.videoWidth);
+  const y = Math.round(((e.clientY - rect.top) / rect.height) * video.videoHeight);
+  if (!x || !y) return;
+  if (e.shiftKey) maskState.points_remove.push({ x, y });
+  else maskState.points_add.push({ x, y });
+  setStatus(`${e.shiftKey ? 'Erase' : 'Add'} point (${x}, ${y})`);
 });
 
-previewVideo.addEventListener('loadedmetadata', () => {
-  trimEnd.value = previewVideo.duration.toFixed(2);
-  updateTrimUI();
-});
-
-[trimStart, trimEnd, disableTrim].forEach((el) => el.addEventListener('input', updateTrimUI));
-
-previewTrimBtn.addEventListener('click', async () => {
-  if (!previewVideo.duration) return;
-  if (disableTrim.checked) {
-    previewVideo.currentTime = 0;
-    await previewVideo.play();
-    return;
-  }
-  const start = Math.max(0, Number(trimStart.value || 0));
-  const end = Math.min(previewVideo.duration, Math.max(start + 0.1, Number(trimEnd.value || 0)));
-  previewVideo.currentTime = start;
-  trimPreviewActive = true;
-  await previewVideo.play();
-  const handler = () => {
-    if (trimPreviewActive && previewVideo.currentTime >= end) {
-      previewVideo.pause();
-      trimPreviewActive = false;
-      previewVideo.removeEventListener('timeupdate', handler);
-    }
+$('previewMaskBtn').onclick = async () => {
+  if (!currentVideoId || !maskState.points_add.length) return setStatus('Add at least one positive point.', true);
+  const video = $('previewVideo');
+  const fd = new FormData();
+  fd.append('video_id', currentVideoId);
+  fd.append('point_x', maskState.points_add[0].x);
+  fd.append('point_y', maskState.points_add[0].y);
+  fd.append('time_s', video.currentTime || 0);
+  fd.append('config_json', JSON.stringify({ ...maskState, dilation_px: +$('dilationPx').value, feather_px: +$('featherPx').value }));
+  const data = await api('/api/preview-mask', { method: 'POST', body: fd });
+  const img = new Image();
+  img.onload = () => {
+    const canvas = $('overlayCanvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
   };
-  previewVideo.addEventListener('timeupdate', handler);
-});
+  img.src = `data:image/png;base64,${data.overlay}`;
+};
 
-previewVideo.addEventListener('click', (e) => {
-  if (!previewVideo.videoWidth || !previewVideo.videoHeight) return;
-  const r = previewVideo.getBoundingClientRect();
-  const x = ((e.clientX - r.left) / r.width) * previewVideo.videoWidth;
-  const y = ((e.clientY - r.top) / r.height) * previewVideo.videoHeight;
-  selectedPoint = { x: Math.round(x), y: Math.round(y) };
-  setStatus(`Selected object point: (${selectedPoint.x}, ${selectedPoint.y})`);
-});
+$('clearMaskBtn').onclick = () => {
+  maskState.points_add = [];
+  maskState.points_remove = [];
+  const c = $('overlayCanvas');
+  c.getContext('2d').clearRect(0, 0, c.width, c.height);
+};
 
-overlayBtn.addEventListener('click', async () => {
-  if (!videoId || !selectedPoint) return setStatus('Upload video and click object first.', true);
-  try {
-    const form = new FormData();
-    form.append('video_id', videoId);
-    form.append('point_x', selectedPoint.x);
-    form.append('point_y', selectedPoint.y);
-    form.append('time_s', previewVideo.currentTime || 0);
-    const data = await apiJson('/api/preview-mask', { method: 'POST', body: form });
-    const img = new Image();
-    img.onload = () => {
-      maskCanvas.width = img.width;
-      maskCanvas.height = img.height;
-      maskCanvas.getContext('2d').drawImage(img, 0, 0);
+async function loadBackgrounds() {
+  const items = await api('/api/backgrounds');
+  $('backgroundGrid').innerHTML = '';
+  items.forEach((bg) => {
+    const el = document.createElement('div');
+    el.className = `bg-tile ${selectedBackground === bg.id ? 'active' : ''}`;
+    el.innerHTML = `<img src="${bg.url}"/><small>${bg.name}</small>`;
+    el.onclick = () => {
+      selectedBackground = bg.id;
+      loadBackgrounds();
     };
-    img.src = `data:image/png;base64,${data.overlay}`;
-  } catch (err) {
-    setStatus(`Overlay failed: ${err.message}`, true);
-  }
-});
+    $('backgroundGrid').appendChild(el);
+  });
+}
 
-backgroundUpload.addEventListener('change', async (e) => {
+$('backgroundUpload').onchange = async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  try {
-    const form = new FormData();
-    form.append('file', file);
-    const data = await apiJson('/api/upload-background', { method: 'POST', body: form });
-    selectedBackground = data.background_id;
-    await loadBackgrounds();
-  } catch (err) {
-    setStatus(`Background upload failed: ${err.message}`, true);
-  }
-});
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await api('/api/upload-background', { method: 'POST', body: fd });
+  selectedBackground = res.background_id;
+  loadBackgrounds();
+};
 
-processBtn.addEventListener('click', async () => {
-  if (!videoId || !selectedPoint) return setStatus('Missing video or mask point.', true);
-  try {
-    const start = Number(trimStart.value || 0);
-    const end = Number(trimEnd.value || 0);
-    const req = {
-      video_id: videoId,
-      background_id: selectedBackground,
-      point_x: selectedPoint.x,
-      point_y: selectedPoint.y,
-      trim_start: start,
-      trim_end: end > start ? end : null,
-      disable_trim: disableTrim.checked,
-    };
+function renderTimeline() {
+  const track = $('timelineTrack');
+  track.innerHTML = '';
+  timelineClips.sort((a, b) => a.position - b.position).forEach((clip) => {
+    const block = document.createElement('div');
+    block.className = 'clip-block';
+    block.draggable = true;
+    block.dataset.id = clip.clip_id;
+    block.innerHTML = `<strong>${clip.clip_id}</strong><br/>In: ${clip.in_point}s`;
+    block.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', clip.clip_id));
+    track.appendChild(block);
+  });
+}
 
-    const { job_id } = await apiJson('/api/process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
+$('timelineTrack').addEventListener('dragover', (e) => e.preventDefault());
+$('timelineTrack').addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const id = e.dataTransfer.getData('text/plain');
+  const idx = [...$('timelineTrack').children].findIndex((child) => e.clientX < child.getBoundingClientRect().right);
+  const current = timelineClips.find((c) => c.clip_id === id);
+  if (!current) return;
+  timelineClips = timelineClips.filter((c) => c.clip_id !== id);
+  timelineClips.splice(idx < 0 ? timelineClips.length : idx, 0, current);
+  timelineClips.forEach((c, i) => (c.position = i));
+  renderTimeline();
+  if (projectId) {
+    await api(`/api/projects/${projectId}/timeline-order`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_ids: timelineClips.map((c) => c.clip_id) }),
     });
-
-    setStatus('Processing…');
-    const poll = setInterval(async () => {
-      try {
-        const job = await apiJson(`/api/jobs/${job_id}`);
-        progressBar.style.width = `${job.progress || 0}%`;
-        if (job.status === 'done') {
-          setStatus('Done! Added to library.');
-          clearInterval(poll);
-          await loadLibrary();
-        }
-        if (job.status === 'error') {
-          setStatus(`Error: ${job.error}`, true);
-          clearInterval(poll);
-        }
-      } catch (err) {
-        setStatus(`Polling failed: ${err.message}`, true);
-        clearInterval(poll);
-      }
-    }, 900);
-  } catch (err) {
-    setStatus(`Process start failed: ${err.message}`, true);
   }
 });
+
+$('exportBtn').onclick = async () => {
+  if (!projectId || !currentVideoId || !maskState.points_add.length) return setStatus('Need project, video and mask point', true);
+  const payload = {
+    project_id: projectId,
+    background_id: selectedBackground,
+    video_id: currentVideoId,
+    trim_start: +$('trimStart').value || 0,
+    trim_end: +$('trimEnd').value || null,
+    disable_trim: $('disableTrim').checked,
+    mask: { ...maskState, dilation_px: +$('dilationPx').value, feather_px: +$('featherPx').value },
+  };
+  const { job_id } = await api('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const poll = setInterval(async () => {
+    const job = await api(`/api/jobs/${job_id}`);
+    $('progressBar').style.width = `${job.progress || 0}%`;
+    if (job.status === 'done' || job.status === 'error') {
+      clearInterval(poll);
+      setStatus(job.status === 'done' ? 'Export complete' : (job.error || 'Export failed'), job.status === 'error');
+      if (job.status === 'done') loadLibrary();
+    }
+  }, 800);
+};
 
 async function loadLibrary() {
-  try {
-    const items = await apiJson('/api/library');
-    libraryEl.innerHTML = '';
-    items.forEach((item) => {
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML = `
-        <video controls src="${item.url}" style="width:100%;border-radius:8px"></video>
-        <a href="${item.url}" download>Download MP4</a>
-        <div>${new Date(item.created_at).toLocaleString()}</div>
-      `;
-      libraryEl.appendChild(card);
-    });
-  } catch (err) {
-    setStatus(`Library load failed: ${err.message}`, true);
-  }
+  const items = await api('/api/library');
+  $('library').innerHTML = '';
+  items.forEach((item) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `<video controls src="${item.url}"></video><a href="${item.url}" download>Download export</a>`;
+    $('library').appendChild(card);
+  });
 }
 
 loadBackgrounds();
 loadLibrary();
-updateTrimUI();

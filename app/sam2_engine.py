@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -10,98 +11,87 @@ import numpy as np
 
 @dataclass
 class SegmentationConfig:
-    sam2_checkpoint: Optional[Path] = None
-    sam2_model_cfg: str = "sam2_hiera_l.yaml"
+    min_area: int = 40
 
 
 class Sam2Segmenter:
-    """Attempts to use SAM2 when available, falls back to GrabCut.
-
-    The fallback keeps this application functional without model files.
-    """
+    """Uses SAM2 if available, else falls back to GrabCut-like segmentation."""
 
     def __init__(self, config: SegmentationConfig):
         self.config = config
-        self._sam_predictor = None
-        self._tracked_point: Optional[np.ndarray] = None
-        self._prev_gray: Optional[np.ndarray] = None
-        self._init_sam2()
+        self._sam2_predictor = self._try_load_sam2()
 
-    def _init_sam2(self) -> None:
-        if not self.config.sam2_checkpoint:
-            return
-        if not self.config.sam2_checkpoint.exists():
-            return
+    def _try_load_sam2(self):
         try:
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
+            from sam2.build_sam import build_sam2  # type: ignore
+            from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore
 
-            model = build_sam2(self.config.sam2_model_cfg, str(self.config.sam2_checkpoint), device="cpu")
-            self._sam_predictor = SAM2ImagePredictor(model)
+            checkpoint = Path("sam2_checkpoint.pt")
+            config_path = "sam2_hiera_l.yaml"
+            if checkpoint.exists():
+                model = build_sam2(config_path, str(checkpoint))
+                return SAM2ImagePredictor(model)
         except Exception:
-            self._sam_predictor = None
-
-    def _mask_from_sam2(self, frame: np.ndarray, point: Tuple[int, int]) -> Optional[np.ndarray]:
-        if self._sam_predictor is None:
             return None
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        self._sam_predictor.set_image(rgb)
-        masks, scores, _ = self._sam_predictor.predict(
-            point_coords=np.array([[point[0], point[1]]]),
-            point_labels=np.array([1]),
-            multimask_output=True,
-        )
-        best = masks[np.argmax(scores)]
-        return (best.astype(np.uint8)) * 255
+        return None
 
-    def _mask_from_grabcut(self, frame: np.ndarray, point: Tuple[int, int]) -> np.ndarray:
+    def _fallback_segment(self, frame: np.ndarray, x: int, y: int) -> np.ndarray:
         h, w = frame.shape[:2]
-        x, y = point
-        box_w = max(50, w // 4)
-        box_h = max(50, h // 4)
-        x1 = int(max(0, min(w - 1, x - box_w // 2)))
-        y1 = int(max(0, min(h - 1, y - box_h // 2)))
-        x2 = int(min(w - 1, x1 + box_w))
-        y2 = int(min(h - 1, y1 + box_h))
+        x = int(np.clip(x, 0, w - 1))
+        y = int(np.clip(y, 0, h - 1))
 
-        mask = np.zeros(frame.shape[:2], np.uint8)
+        mask = np.zeros((h, w), np.uint8)
         bgd_model = np.zeros((1, 65), np.float64)
         fgd_model = np.zeros((1, 65), np.float64)
-        rect = (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+        size = max(32, min(h, w) // 8)
+        rect = (max(0, x - size), max(0, y - size), min(size * 2, w - 1), min(size * 2, h - 1))
+
         cv2.grabCut(frame, mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
-        output = np.where((mask == 2) | (mask == 0), 0, 255).astype("uint8")
-        return output
+        out = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
 
-    def _track_point(self, frame: np.ndarray, initial_point: Tuple[int, int]) -> Tuple[int, int]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if self._tracked_point is None:
-            self._tracked_point = np.array([[initial_point]], dtype=np.float32)
-            self._prev_gray = gray
-            return initial_point
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((out > 0).astype(np.uint8), connectivity=8)
+        best = 0
+        best_area = 0
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area > best_area and area >= self.config.min_area:
+                best_area = area
+                best = i
+        if best > 0:
+            return np.where(labels == best, 255, 0).astype(np.uint8)
+        return out
 
-        if self._prev_gray is not None:
-            next_point, status, _ = cv2.calcOpticalFlowPyrLK(
-                self._prev_gray,
-                gray,
-                self._tracked_point,
-                None,
-                winSize=(21, 21),
-                maxLevel=2,
-            )
-            if status is not None and status[0][0] == 1:
-                self._tracked_point = next_point
+    def segment(self, frame: np.ndarray, x: int, y: int) -> np.ndarray:
+        if self._sam2_predictor is not None:
+            try:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self._sam2_predictor.set_image(rgb)
+                masks, _, _ = self._sam2_predictor.predict(
+                    point_coords=np.array([[x, y]]), point_labels=np.array([1]), multimask_output=False
+                )
+                return (masks[0].astype(np.uint8) * 255)
+            except Exception:
+                pass
+        return self._fallback_segment(frame, x, y)
 
-        self._prev_gray = gray
-        pt = self._tracked_point[0][0]
-        return int(pt[0]), int(pt[1])
 
-    def reset(self) -> None:
-        self._tracked_point = None
-        self._prev_gray = None
+def ensure_sam2_runtime(root: Path) -> dict:
+    script = root / "installer" / "install_sam2.py"
+    if not script.exists():
+        return {"ok": False, "message": "install_sam2.py missing"}
 
-    def get_mask(self, frame: np.ndarray, initial_point: Tuple[int, int]) -> np.ndarray:
-        point = self._track_point(frame, initial_point)
-        sam_mask = self._mask_from_sam2(frame, point)
-        if sam_mask is not None:
-            return sam_mask
-        return self._mask_from_grabcut(frame, point)
+    python_exe = shutil.which("python")
+    if not python_exe:
+        return {"ok": False, "message": "python not found"}
+
+    try:
+        result = subprocess.run([python_exe, str(script)], cwd=str(root), capture_output=True, text=True, check=False)
+        return {
+            "ok": result.returncode == 0,
+            "code": result.returncode,
+            "stdout": result.stdout[-1000:],
+            "stderr": result.stderr[-1000:],
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
