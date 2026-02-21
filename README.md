@@ -1,61 +1,53 @@
-# Magic Mask Pro
+# Magic Mask Pro Studio
 
-Magic Mask Pro is a reactive video masking app that uses **SAM 2** (when available) to isolate an object in video and replace the background.
+Magic Mask Pro Studio is a Windows-11-friendly video masking editor with a DaVinci-inspired workspace:
 
-## What works now
+- Media bin + timeline track with draggable clip order.
+- Trim in / trim out controls.
+- Interactive mask setup before tracking (add/remove points).
+- Live mask preview.
+- Export to green screen, blue screen, or a custom background.
+- One-click SAM2 + dependency installation flow.
 
-- Object pick + preview mask overlay.
-- **No Trim** toggle (full video) and manual trim start/end.
-- **Trim segment preview** in the player before rendering.
-- Background selection (green screen, blue screen, or uploaded image).
-- Async processing with live progress bar.
-- Library view with playback and MP4 download.
-- High-quality MP4 export.
-- Animated responsive UI + logo.
+## One-click install (Windows 11)
 
-## Step-by-step: run locally
-
-1. Open a terminal in the project root:
-   ```bash
-   cd /workspace/magic-mask-pro
+1. Open **PowerShell as Administrator**.
+2. In repo root, run:
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\installer\install_windows.ps1 -Launch
    ```
-2. Create and activate virtualenv:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Start server:
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-5. Open browser:
-   ```
-   http://localhost:8000
-   ```
+3. App starts at `http://localhost:8000`.
 
-## Step-by-step: use the app
+This installer will automatically:
+- install Python 3.11 (if missing),
+- install FFmpeg (if missing),
+- create `.venv`,
+- install Python dependencies,
+- install SAM2 runtime dependencies.
 
-1. Upload a video.
-2. Click your object in the video to set mask target.
-3. Click **Generate Preview Overlay** to verify mask.
-4. Choose background (green/blue/custom upload).
-5. Either:
-   - keep **No Trim** checked for full video, or
-   - uncheck it, set Start/End, then click **Preview Trim Segment**.
-6. Click **Render High Quality Video**.
-7. Watch progress bar.
-8. Download final MP4 from **Library**.
+## Manual setup (any OS)
 
-## SAM 2 setup (optional)
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python installer/install_sam2.py
+uvicorn app.main:app --reload
+```
 
-If SAM2 package + checkpoint are available, app uses SAM2 automatically:
+## Editing workflow
 
-1. Install SAM2 in your environment.
-2. Place checkpoint file at `sam2_checkpoint.pt` in repo root.
-3. Restart server.
+1. Create a project.
+2. Upload a video.
+3. Add clips to timeline.
+4. Click video to add mask points.
+5. Shift + click to remove regions.
+6. Tune dilation/feather for edge behavior.
+7. Choose export background (green/blue/custom).
+8. Export composite and download from the library panel.
 
-If SAM2 is unavailable, app falls back to OpenCV segmentation.
+## SAM2 notes
+
+- The app can run fallback segmentation when SAM2 checkpoint is missing.
+- Place your checkpoint at `sam2_checkpoint.pt` in the repository root for full SAM2 masking.

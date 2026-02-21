@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -15,9 +16,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.sam2_engine import Sam2Segmenter, SegmentationConfig
+from app.sam2_engine import Sam2Segmenter, SegmentationConfig, ensure_sam2_runtime
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -28,29 +29,78 @@ OUTPUTS = DATA / "outputs"
 for folder in (UPLOADS, BACKGROUNDS, OUTPUTS):
     folder.mkdir(parents=True, exist_ok=True)
 
-GREEN_BG = BACKGROUNDS / "greenscreen.png"
-BLUE_BG = BACKGROUNDS / "bluescreen.png"
-if not GREEN_BG.exists():
-    cv2.imwrite(str(GREEN_BG), np.full((1080, 1920, 3), (0, 255, 0), dtype=np.uint8))
-if not BLUE_BG.exists():
-    cv2.imwrite(str(BLUE_BG), np.full((1080, 1920, 3), (255, 0, 0), dtype=np.uint8))
+PRESET_BACKGROUNDS = {
+    "greenscreen": (0, 255, 0),
+    "bluescreen": (255, 0, 0),
+}
+for bg_name, bgr in PRESET_BACKGROUNDS.items():
+    target = BACKGROUNDS / f"{bg_name}.png"
+    if not target.exists():
+        cv2.imwrite(str(target), np.full((1080, 1920, 3), bgr, dtype=np.uint8))
 
-app = FastAPI(title="Magic Mask Pro")
+
+@dataclass
+class Clip:
+    clip_id: str
+    video_id: str
+    in_point: float = 0.0
+    out_point: Optional[float] = None
+    position: int = 0
+
+
+@dataclass
+class EditorProject:
+    project_id: str
+    name: str
+    clips: List[Clip] = field(default_factory=list)
+
+
+class ClipCreateRequest(BaseModel):
+    project_id: str
+    video_id: str
+    in_point: float = 0.0
+    out_point: Optional[float] = None
+
+
+class ClipUpdateRequest(BaseModel):
+    in_point: float = 0.0
+    out_point: Optional[float] = None
+    position: int = 0
+
+
+class TimelineOrderRequest(BaseModel):
+    clip_ids: List[str]
+
+
+class MaskPoint(BaseModel):
+    x: int
+    y: int
+
+
+class MaskConfigRequest(BaseModel):
+    points_add: List[MaskPoint] = Field(default_factory=list)
+    points_remove: List[MaskPoint] = Field(default_factory=list)
+    dilation_px: int = 5
+    feather_px: int = 3
+
+
+class ExportRequest(BaseModel):
+    project_id: str
+    background_id: str
+    video_id: str
+    trim_start: float = 0.0
+    trim_end: Optional[float] = None
+    disable_trim: bool = False
+    mask: MaskConfigRequest
+
+
+app = FastAPI(title="Magic Mask Pro Studio")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/web", StaticFiles(directory=ROOT / "web", html=True), name="web")
 
 jobs: Dict[str, Dict] = {}
 library: List[Dict] = []
-
-
-class ProcessRequest(BaseModel):
-    video_id: str
-    background_id: str
-    point_x: int
-    point_y: int
-    trim_start: float = 0.0
-    trim_end: Optional[float] = None
-    disable_trim: bool = False
+projects: Dict[str, EditorProject] = {}
 
 
 @app.get("/")
@@ -60,18 +110,83 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "name": "Magic Mask Pro"}
+    return {"ok": True, "name": "Magic Mask Pro Studio"}
+
+
+@app.post("/api/install/sam2")
+def install_sam2():
+    report = ensure_sam2_runtime(ROOT)
+    return report
+
+
+@app.post("/api/projects")
+def create_project(name: str = Form("Untitled Project")):
+    project_id = f"proj_{uuid.uuid4().hex[:10]}"
+    projects[project_id] = EditorProject(project_id=project_id, name=name)
+    return {"project_id": project_id, "name": name}
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str):
+    project = projects.get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return {
+        "project_id": project.project_id,
+        "name": project.name,
+        "clips": [clip.__dict__ for clip in sorted(project.clips, key=lambda c: c.position)],
+    }
+
+
+@app.post("/api/clips")
+def add_clip(req: ClipCreateRequest):
+    project = projects.get(req.project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    clip = Clip(
+        clip_id=f"clip_{uuid.uuid4().hex[:10]}",
+        video_id=req.video_id,
+        in_point=max(0.0, req.in_point),
+        out_point=req.out_point,
+        position=len(project.clips),
+    )
+    project.clips.append(clip)
+    return clip.__dict__
+
+
+@app.patch("/api/clips/{clip_id}")
+def update_clip(clip_id: str, req: ClipUpdateRequest):
+    for project in projects.values():
+        for clip in project.clips:
+            if clip.clip_id == clip_id:
+                clip.in_point = max(0.0, req.in_point)
+                clip.out_point = req.out_point
+                clip.position = max(0, req.position)
+                return clip.__dict__
+    raise HTTPException(404, "Clip not found")
+
+
+@app.post("/api/projects/{project_id}/timeline-order")
+def reorder_timeline(project_id: str, req: TimelineOrderRequest):
+    project = projects.get(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    clip_map = {clip.clip_id: clip for clip in project.clips}
+    for idx, clip_id in enumerate(req.clip_ids):
+        if clip_id in clip_map:
+            clip_map[clip_id].position = idx
+    return {"ok": True}
 
 
 @app.get("/api/backgrounds")
 def get_backgrounds():
     return [
-        {"id": "greenscreen", "name": "Green Screen", "url": "/api/background-file/greenscreen"},
-        {"id": "bluescreen", "name": "Blue Screen", "url": "/api/background-file/bluescreen"},
-        *[
-            {"id": p.stem, "name": p.name, "url": f"/api/background-file/{p.stem}"}
-            for p in BACKGROUNDS.glob("uploaded_*.*")
-        ],
+        {
+            "id": p.stem,
+            "name": p.name,
+            "url": f"/api/background-file/{p.stem}",
+        }
+        for p in sorted(BACKGROUNDS.glob("*.*"))
     ]
 
 
@@ -82,196 +197,205 @@ def background_file(bg_id: str):
     raise HTTPException(404, "Background not found")
 
 
-def _transcode_to_mp4(source: Path, target: Path) -> bool:
-    if shutil.which("ffmpeg") is None:
-        return False
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(source),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-                str(target),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return True
-    except Exception:
-        return False
-
-
 @app.post("/api/upload-video")
 async def upload_video(file: UploadFile = File(...)):
-    ext = Path(file.filename).suffix or ".bin"
-    raw_id = f"video_raw_{uuid.uuid4().hex}{ext}"
-    raw_target = UPLOADS / raw_id
-    with raw_target.open("wb") as f:
+    ext = Path(file.filename).suffix or ".mp4"
+    target = UPLOADS / f"video_{uuid.uuid4().hex}{ext}"
+    with target.open("wb") as f:
         f.write(await file.read())
 
-    cap = cv2.VideoCapture(str(raw_target))
-    readable = cap.isOpened() and int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) > 0
+    cap = cv2.VideoCapture(str(target))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
+    duration = frame_count / fps if fps > 0 else 0
     cap.release()
 
-    if readable:
-        return {"video_id": raw_id}
+    if frame_count <= 0:
+        raise HTTPException(400, "Could not parse video file")
 
-    converted_id = f"video_{uuid.uuid4().hex}.mp4"
-    converted_target = UPLOADS / converted_id
-    if _transcode_to_mp4(raw_target, converted_target):
-        raw_target.unlink(missing_ok=True)
-        return {"video_id": converted_id}
-
-    raise HTTPException(400, "Video could not be read. Try MP4/H264 or install ffmpeg for auto-convert.")
+    return {"video_id": target.name, "duration": round(duration, 2)}
 
 
 @app.post("/api/upload-background")
 async def upload_background(file: UploadFile = File(...)):
     ext = Path(file.filename).suffix or ".png"
-    file_id = f"uploaded_{uuid.uuid4().hex}{ext}"
-    target = BACKGROUNDS / file_id
+    target = BACKGROUNDS / f"uploaded_{uuid.uuid4().hex}{ext}"
     with target.open("wb") as f:
         f.write(await file.read())
-    return {"background_id": Path(file_id).stem}
+    return {"background_id": target.stem}
+
+
+def _resolve_background(bg_id: str, shape: tuple[int, int]) -> np.ndarray:
+    h, w = shape
+    for candidate in BACKGROUNDS.glob(f"{bg_id}.*"):
+        bg = cv2.imread(str(candidate))
+        if bg is None:
+            break
+        return cv2.resize(bg, (w, h), interpolation=cv2.INTER_AREA)
+    if bg_id == "greenscreen":
+        return np.full((h, w, 3), (0, 255, 0), dtype=np.uint8)
+    if bg_id == "bluescreen":
+        return np.full((h, w, 3), (255, 0, 0), dtype=np.uint8)
+    raise HTTPException(404, "Background not found")
+
+
+def _mask_with_controls(frame: np.ndarray, mask: np.ndarray, config: MaskConfigRequest) -> np.ndarray:
+    controlled = mask.astype(np.uint8)
+    if config.dilation_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config.dilation_px * 2 + 1, config.dilation_px * 2 + 1))
+        controlled = cv2.dilate(controlled, k)
+    if config.feather_px > 0:
+        blur = config.feather_px * 2 + 1
+        controlled = cv2.GaussianBlur(controlled.astype(np.float32), (blur, blur), 0)
+
+    for point in config.points_add:
+        cv2.circle(controlled, (point.x, point.y), 24, 255, -1)
+    for point in config.points_remove:
+        cv2.circle(controlled, (point.x, point.y), 24, 0, -1)
+
+    return np.clip(controlled, 0, 255).astype(np.uint8)
 
 
 @app.post("/api/preview-mask")
-def preview_mask(video_id: str = Form(...), point_x: int = Form(...), point_y: int = Form(...), time_s: float = Form(0.0)):
-    source = UPLOADS / video_id
-    if not source.exists():
+async def preview_mask(
+    video_id: str = Form(...),
+    point_x: int = Form(...),
+    point_y: int = Form(...),
+    time_s: float = Form(0.0),
+    config_json: str = Form('{"points_add": [], "points_remove": [], "dilation_px": 5, "feather_px": 3}'),
+):
+    video_path = UPLOADS / video_id
+    if not video_path.exists():
         raise HTTPException(404, "Video not found")
 
-    cap = cv2.VideoCapture(str(source))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(time_s * fps)))
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0.0, time_s) * fps))
     ok, frame = cap.read()
     cap.release()
     if not ok:
-        raise HTTPException(400, "Could not read preview frame")
+        raise HTTPException(400, "Could not read frame")
 
-    seg = Sam2Segmenter(SegmentationConfig(sam2_checkpoint=ROOT / "sam2_checkpoint.pt"))
-    mask = seg.get_mask(frame, (point_x, point_y))
+    seg = Sam2Segmenter(SegmentationConfig())
+    mask = seg.segment(frame, point_x, point_y)
+
+    config = MaskConfigRequest.model_validate_json(config_json)
+    controlled = _mask_with_controls(frame, mask, config)
+
     overlay = frame.copy()
-    overlay[mask > 0] = (0, 200, 255)
-    blended = cv2.addWeighted(frame, 0.45, overlay, 0.55, 0)
-    _, png = cv2.imencode(".png", blended)
+    overlay[controlled > 120] = (20, 220, 20)
+    preview = cv2.addWeighted(frame, 0.55, overlay, 0.45, 0)
+
+    _, png = cv2.imencode(".png", preview)
     return {"overlay": base64.b64encode(png.tobytes()).decode("utf-8")}
 
 
-def _resolve_background(bg_id: str) -> Path:
-    for candidate in BACKGROUNDS.glob(f"{bg_id}.*"):
-        return candidate
-    raise FileNotFoundError(bg_id)
+@app.post("/api/export")
+def export_video(req: ExportRequest):
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+    jobs[job_id] = {"status": "queued", "progress": 0, "error": None}
 
+    def _run():
+        try:
+            jobs[job_id]["status"] = "running"
+            video_path = UPLOADS / req.video_id
+            if not video_path.exists():
+                raise RuntimeError("Video missing")
 
-def _process_job(job_id: str, req: ProcessRequest):
-    try:
-        source = UPLOADS / req.video_id
-        background_path = _resolve_background(req.background_id)
+            cap = cv2.VideoCapture(str(video_path))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total <= 0:
+                raise RuntimeError("Bad video")
 
-        cap = cv2.VideoCapture(str(source))
-        if not cap.isOpened():
-            raise RuntimeError("Unable to open video for processing")
+            start_frame = 0 if req.disable_trim else int(max(0.0, req.trim_start) * fps)
+            end_frame = total if req.disable_trim else int((req.trim_end or (total / fps)) * fps)
+            end_frame = max(start_frame + 1, min(end_frame, total))
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            out_path = OUTPUTS / f"export_{uuid.uuid4().hex}.mp4"
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
-        if req.disable_trim:
-            start_frame = 0
-            end_frame = frame_count
-        else:
-            start_frame = int(max(0, req.trim_start * fps))
-            end_frame = int((req.trim_end * fps) if req.trim_end is not None else frame_count)
-            end_frame = min(frame_count, max(start_frame + 1, end_frame))
+            seg = Sam2Segmenter(SegmentationConfig())
+            for frame_idx in range(total):
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if frame_idx < start_frame:
+                    continue
+                if frame_idx >= end_frame:
+                    break
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                first_point = req.mask.points_add[0] if req.mask.points_add else MaskPoint(x=width // 2, y=height // 2)
+                raw_mask = seg.segment(frame, first_point.x, first_point.y)
+                mask = _mask_with_controls(frame, raw_mask, req.mask)
+                bg = _resolve_background(req.background_id, (height, width))
 
-        temp_output = OUTPUTS / f"{job_id}_temp.mp4"
-        final_output = OUTPUTS / f"{job_id}.mp4"
-        writer = cv2.VideoWriter(str(temp_output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+                alpha = (mask.astype(np.float32) / 255.0)[..., None]
+                result = (frame * alpha + bg * (1 - alpha)).astype(np.uint8)
+                writer.write(result)
 
-        bg_img = cv2.imread(str(background_path))
-        if bg_img is None:
-            raise RuntimeError("Background image could not be loaded")
-        bg_img = cv2.resize(bg_img, (width, height))
+                processed = frame_idx - start_frame + 1
+                span = max(1, end_frame - start_frame)
+                jobs[job_id]["progress"] = int((processed / span) * 100)
 
-        segmenter = Sam2Segmenter(SegmentationConfig(sam2_checkpoint=ROOT / "sam2_checkpoint.pt"))
+            cap.release()
+            writer.release()
 
-        processed = 0
-        total = max(1, end_frame - start_frame)
-        while cap.isOpened() and (start_frame + processed) < end_frame:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            mask = segmenter.get_mask(frame, (req.point_x, req.point_y))
-            mask3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
-            composed = (frame * mask3 + bg_img * (1.0 - mask3)).astype(np.uint8)
-            writer.write(composed)
+            library.append(
+                {
+                    "id": out_path.stem,
+                    "url": f"/api/output/{out_path.name}",
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+            jobs[job_id]["status"] = "done"
+            jobs[job_id]["progress"] = 100
+        except Exception as exc:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = str(exc)
 
-            processed += 1
-            jobs[job_id]["progress"] = int((processed / total) * 100)
-
-        cap.release()
-        writer.release()
-
-        if processed == 0:
-            raise RuntimeError("No frames were rendered. Check trim range.")
-
-        transcoded = _transcode_to_mp4(temp_output, final_output)
-        if transcoded:
-            temp_output.unlink(missing_ok=True)
-        else:
-            temp_output.rename(final_output)
-
-        entry = {
-            "id": job_id,
-            "file": final_output.name,
-            "url": f"/api/download/{job_id}",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-        }
-        library.insert(0, entry)
-        jobs[job_id].update({"status": "done", "progress": 100, "result": entry})
-    except Exception as exc:
-        jobs[job_id].update({"status": "error", "error": str(exc)})
-
-
-@app.post("/api/process")
-def process_video(req: ProcessRequest):
-    if not (UPLOADS / req.video_id).exists():
-        raise HTTPException(404, "Video missing")
-    job_id = f"job_{uuid.uuid4().hex}"
-    jobs[job_id] = {"status": "processing", "progress": 0}
-    threading.Thread(target=_process_job, args=(job_id, req), daemon=True).start()
+    threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
 
 
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
-    if job_id not in jobs:
+def get_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
         raise HTTPException(404, "Job not found")
-    return jobs[job_id]
+    return job
 
 
 @app.get("/api/library")
 def get_library():
-    return library
+    return list(reversed(library))
 
 
-@app.get("/api/download/{job_id}")
-def download(job_id: str):
-    target = OUTPUTS / f"{job_id}.mp4"
+
+
+@app.get("/api/media/{filename}")
+def get_media(filename: str):
+    target = UPLOADS / filename
+    if not target.exists():
+        raise HTTPException(404, "Media not found")
+    return FileResponse(target)
+
+
+@app.get("/api/output/{filename}")
+def get_output(filename: str):
+    target = OUTPUTS / filename
     if not target.exists():
         raise HTTPException(404, "Output not found")
-    return FileResponse(target, media_type="video/mp4", filename=f"magic-mask-pro-{job_id}.mp4")
+    return FileResponse(target)
+
+
+@app.post("/api/one-click/check")
+def one_click_check():
+    return {
+        "python": shutil.which("python") is not None,
+        "ffmpeg": shutil.which("ffmpeg") is not None,
+        "sam2_checkpoint": (ROOT / "sam2_checkpoint.pt").exists(),
+        "windows_installer": (ROOT / "installer" / "install_windows.ps1").exists(),
+    }

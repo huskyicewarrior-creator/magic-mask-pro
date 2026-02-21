@@ -1,58 +1,72 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>Magic Mask Pro</title>
-  <link rel="stylesheet" href="/web/styles.css" />
-</head>
-<body>
-  <header class="topbar">
-    <img src="/web/assets/logo.svg" class="logo" alt="Magic Mask Pro logo" />
-    <h1>Magic Mask Pro</h1>
-  </header>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Magic Mask Pro Studio</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Magic Mask Pro Studio</h1>
+      <button id="installSam2Btn" class="secondary">One-Click SAM2 Setup</button>
+      <span id="status" class="status">Ready</span>
+    </header>
 
-  <main class="layout">
-    <section class="panel">
-      <h2>1) Source Video</h2>
-      <input id="videoUpload" type="file" accept="video/*" />
-      <video id="previewVideo" controls></video>
+    <main class="editor">
+      <aside class="panel media-bin">
+        <h2>Media Bin</h2>
+        <input id="projectName" value="Untitled Project" />
+        <button id="createProjectBtn">Create Project</button>
+        <input id="videoUpload" type="file" accept="video/*" />
+        <button id="addClipBtn">Add Clip to Timeline</button>
+        <div id="clipInfo"></div>
+      </aside>
 
-      <div class="trim-header">
-        <h3>Trim</h3>
-        <label class="inline-check"><input id="disableTrim" type="checkbox" checked /> No Trim (use full video)</label>
-      </div>
+      <section class="panel preview-pane">
+        <h2>Live Preview</h2>
+        <div class="preview-stack">
+          <video id="previewVideo" controls></video>
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+        <div class="toolbar">
+          <label>Trim In <input id="trimStart" type="number" value="0" min="0" step="0.1" /></label>
+          <label>Trim Out <input id="trimEnd" type="number" value="0" min="0" step="0.1" /></label>
+          <label><input id="disableTrim" type="checkbox" checked /> No Trim</label>
+        </div>
+      </section>
 
-      <div id="trimControls" class="trim-row disabled">
-        <label>Start (s)<input id="trimStart" type="number" value="0" step="0.1" min="0" /></label>
-        <label>End (s)<input id="trimEnd" type="number" value="0" step="0.1" min="0" /></label>
-      </div>
-      <button id="previewTrimBtn">Preview Trim Segment</button>
-      <p id="trimInfo" class="muted"></p>
+      <aside class="panel mask-pane">
+        <h2>Mask Tool</h2>
+        <p>Click the preview to add positive points, hold <strong>Shift</strong> + click to erase.</p>
+        <div class="toolbar">
+          <label>Dilation <input id="dilationPx" type="range" min="0" max="32" value="6" /></label>
+          <label>Feather <input id="featherPx" type="range" min="0" max="16" value="4" /></label>
+        </div>
+        <div class="btns">
+          <button id="previewMaskBtn">Live Mask Preview</button>
+          <button id="clearMaskBtn" class="secondary">Clear Points</button>
+        </div>
+
+        <h3>Export Background</h3>
+        <div id="backgroundGrid" class="background-grid"></div>
+        <input id="backgroundUpload" type="file" accept="image/*" />
+        <button id="exportBtn">Export Composite</button>
+        <div class="progress"><div id="progressBar"></div></div>
+      </aside>
+    </main>
+
+    <section class="panel timeline">
+      <h2>Timeline</h2>
+      <p>Drag clips to reorder like an editor track.</p>
+      <div id="timelineTrack" class="timeline-track"></div>
     </section>
 
     <section class="panel">
-      <h2>2) Mask Target</h2>
-      <p>Click object in preview, then generate overlay.</p>
-      <canvas id="maskCanvas"></canvas>
-      <button id="overlayBtn">Generate Preview Overlay</button>
-    </section>
-
-    <section class="panel">
-      <h2>3) Background</h2>
-      <div id="backgroundList" class="bg-grid"></div>
-      <input id="backgroundUpload" type="file" accept="image/*" />
-      <button id="processBtn">Render High Quality Video</button>
-      <div class="progress-wrap"><div id="progressBar"></div></div>
-      <p id="statusText"></p>
-    </section>
-
-    <section class="panel">
-      <h2>Library</h2>
+      <h2>Exports</h2>
       <div id="library" class="library"></div>
     </section>
-  </main>
 
-  <script src="/web/app.js"></script>
-</body>
+    <script src="/web/app.js" type="module"></script>
+  </body>
 </html>
